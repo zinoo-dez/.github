@@ -1,0 +1,100 @@
+name: Reusable Auto-Fix Issue
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  auto-fix:
+    if: github.event.assignee.login == 'zinoo-dez'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout shared runner script
+        uses: actions/checkout@v4
+        with:
+          repository: zinoo-dez/.github
+          path: .ci-runner
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Antigravity SDK
+        run: pip install --upgrade google-antigravity
+
+      - name: Auto-setup Node.js if package.json exists
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Node dependencies
+        if: hashFiles('package.json') != ''
+        run: npm ci || npm install
+
+      - name: Auto-setup Go if go.mod exists
+        if: hashFiles('go.mod') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Auto-setup PHP if composer.json exists
+        if: hashFiles('composer.json') != ''
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+
+      - name: Install PHP dependencies
+        if: hashFiles('composer.json') != ''
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Create fix branch
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "fix/issue-${ISSUE_NUMBER}"
+
+      - name: Run Antigravity Agent
+        env:
+          ANTIGRAVITY_API_KEY: ${{ secrets.ANTIGRAVITY_API_KEY }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          SUMMARY_FILE: /tmp/agent_fix_summary.md
+        run: python3 .ci-runner/.github/scripts/auto_fix_issue.py
+
+      - name: Clean runner and open Draft PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          rm -rf .ci-runner
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes made by agent."
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "fix: resolve issue #${ISSUE_NUMBER}"
+          git push -u origin "fix/issue-${ISSUE_NUMBER}"
+
+          SUMMARY=$(cat /tmp/agent_fix_summary.md 2>/dev/null || echo "Automated fix generated.")
+          gh pr create \
+            --draft \
+            --title "fix: ${ISSUE_TITLE} (#${ISSUE_NUMBER})" \
+            --body "$(printf "Closes #%s\n\n### Summary\n%s\n\n---\n*Please review the diff and CI checks before merging.*" "${ISSUE_NUMBER}" "${SUMMARY}")"
